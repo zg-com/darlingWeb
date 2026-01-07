@@ -15,4 +15,6 @@ public class Goal {
     private Double currentVal; // 当前值
     private Double targetVal;  // 目标值
     private String unit;       // 单位
+    // --- 新增这个字段 ---
+    private String color;      // 进度条颜色
 }
