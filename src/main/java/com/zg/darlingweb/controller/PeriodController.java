@@ -7,6 +7,7 @@ import com.zg.darlingweb.mapper.PeriodSettingMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 @RestController
@@ -35,60 +36,104 @@ public class PeriodController {
         return "success";
     }
 
-    // --- 新逻辑：设置经期开始 ---
+    /**
+     * 设置【经期开始】
+     * 逻辑：
+     * 1. 如果这天附近(比如未来7天内)已经有一条记录的开始时间，说明用户想微调由于那条记录的开始时间 -> 更新它。
+     * 2. 否则，视为一次全新的经期 -> 新建一条(长度读配置)。
+     */
     @PostMapping("/setStart")
     public String setStart(@RequestBody DateRequest req) {
-        LocalDate start = req.getDate();
+        LocalDate newStart = req.getDate();
 
-        // 1. 获取默认持续天数 (比如8天)
-        PeriodSetting setting = settingMapper.selectById(1);
-        int duration = (setting != null && setting.getPeriodLength() != null) ? setting.getPeriodLength() : 7;
-        LocalDate end = start.plusDays(duration - 1); // 减1是因为包含当天
+        List<PeriodRecord> all = periodMapper.selectAllDesc();
+        PeriodRecord target = null;
 
-        // 2. 检查冲突 (简单处理：如果有重叠的，删掉旧的)
-        // 实际项目可能需要更复杂的合并逻辑，这里为了演示稳定性，采用“覆盖”策略
-        List<PeriodRecord> overlaps = periodMapper.selectAllDesc(); // 这里应该用SQL查重叠，为了省事在内存处理
-        for (PeriodRecord r : overlaps) {
-            // 如果新记录和旧记录有重叠
-            if (!(end.isBefore(r.getStartDate()) || start.isAfter(r.getEndDate()))) {
-                periodMapper.deleteById(r.getId());
+        // 寻找“附近”的记录 (允许误差范围：例如 这天之后的 10 天内如果有记录，说明可能是同一条)
+        // 比如记录是 5号~10号，用户点了 3号说开始，应该把 5号改为 3号
+        for (PeriodRecord r : all) {
+            // 如果 记录开始时间 在 [用户点击时间, 用户点击时间+10天] 范围内
+            long diff = ChronoUnit.DAYS.between(newStart, r.getStartDate());
+            if (diff >= 0 && diff <= 10) {
+                target = r;
+                break;
+            }
+            // 或者用户点击的时间 就在这条记录中间，那也可以视为修改开始时间
+            if (!newStart.isBefore(r.getStartDate()) && !newStart.isAfter(r.getEndDate())) {
+                target = r;
+                break;
             }
         }
 
-        // 3. 创建新记录
-        PeriodRecord newRecord = new PeriodRecord();
-        newRecord.setStartDate(start);
-        newRecord.setEndDate(end);
-        periodMapper.insert(newRecord);
-
-        return "Started";
+        if (target != null) {
+            // --- 修正模式 ---
+            // 修改开始时间
+            target.setStartDate(newStart);
+            // 保护机制：如果修改后，开始时间跑到了结束时间后面（非法），则把结束时间自动往后推默认长度
+            if (target.getEndDate().isBefore(newStart)) {
+                int duration = getPeriodLength();
+                target.setEndDate(newStart.plusDays(duration - 1));
+            }
+            periodMapper.updateById(target);
+            return "Updated Start";
+        } else {
+            // --- 新建模式 ---
+            PeriodRecord newRecord = new PeriodRecord();
+            newRecord.setStartDate(newStart);
+            int duration = getPeriodLength();
+            newRecord.setEndDate(newStart.plusDays(duration - 1)); // 减1是因为包含当天
+            periodMapper.insert(newRecord);
+            return "Created New";
+        }
     }
 
-    // --- 新逻辑：设置经期结束 ---
+    /**
+     * 设置【经期结束】
+     * 逻辑：
+     * 1. 往回找最近的一个“开始时间”。
+     * 2. 只要这个开始时间在合理的范围内（比如45天内），就认为这一天是那次经期的结束。
+     */
     @PostMapping("/setEnd")
     public String setEnd(@RequestBody DateRequest req) {
-        LocalDate targetDate = req.getDate();
+        LocalDate newEnd = req.getDate();
 
-        // 找到包含这一天的记录
         List<PeriodRecord> all = periodMapper.selectAllDesc();
+        PeriodRecord target = null;
+
+        // 遍历找“最近的一个开始时间在今天之前的记录”
         for (PeriodRecord r : all) {
-            // 如果这一天在某个记录范围内
-            if (!targetDate.isBefore(r.getStartDate()) && !targetDate.isAfter(r.getEndDate())) {
-                // 修改结束日期为今天
-                r.setEndDate(targetDate);
-                periodMapper.updateById(r);
-                return "Ended";
+            // 记录的开始时间 必须 <= 选中的结束时间
+            if (!r.getStartDate().isAfter(newEnd)) {
+                // 且距离不能太离谱 (比如不能把去年的经期延长到今天)，限制在 45 天内
+                long diff = ChronoUnit.DAYS.between(r.getStartDate(), newEnd);
+                if (diff >= 0 && diff < 45) {
+                    target = r;
+                    break; // 找到了最近的一个
+                }
             }
         }
 
-        // 如果没找到（比如用户手滑点错了），可以考虑创建一个单日记录，或者报错
-        // 这里我们做一个容错：如果没找到，就创建一个单日记录
-        PeriodRecord r = new PeriodRecord();
-        r.setStartDate(targetDate);
-        r.setEndDate(targetDate);
-        periodMapper.insert(r);
+        if (target != null) {
+            target.setEndDate(newEnd);
+            periodMapper.updateById(target);
+            return "Updated End";
+        } else {
+            // 如果实在找不到匹配的开始时间（比如这是第一次用），就创建单日记录
+            PeriodRecord r = new PeriodRecord();
+            r.setStartDate(newEnd); // 既然找不到开始，就把今天同时也当做开始
+            r.setEndDate(newEnd);
+            periodMapper.insert(r);
+            return "Created Single Day (Fallback)";
+        }
+    }
 
-        return "Ended (New)";
+    // 辅助方法：读取默认经期长度，如果没配置默认7天
+    private int getPeriodLength() {
+        PeriodSetting s = settingMapper.selectById(1);
+        if (s != null && s.getPeriodLength() != null && s.getPeriodLength() > 0) {
+            return s.getPeriodLength();
+        }
+        return 7; // 默认值改为用户期望的近似值，当然最好去后台配置
     }
 
     @lombok.Data
