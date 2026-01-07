@@ -8,6 +8,6 @@ public class PeriodSetting {
     private Integer id;
     private String periodColor;
     private String predictColor;
-    private Integer periodLength;
-    private Integer cycleLength;
+    private Integer periodLength; // 默认持续时长
+    private Integer intervalDays; // 间隔天数 (从结束推算开始)
 }

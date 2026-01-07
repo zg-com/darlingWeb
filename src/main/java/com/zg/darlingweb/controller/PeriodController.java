@@ -4,7 +4,6 @@ import com.zg.darlingweb.entity.PeriodRecord;
 import com.zg.darlingweb.entity.PeriodSetting;
 import com.zg.darlingweb.mapper.PeriodMapper;
 import com.zg.darlingweb.mapper.PeriodSettingMapper;
-import lombok.Data;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 import java.time.LocalDate;
@@ -19,107 +18,81 @@ public class PeriodController {
     @Autowired
     private PeriodSettingMapper settingMapper;
 
-    // 1. 获取所有记录
     @GetMapping("/list")
     public List<PeriodRecord> list() {
         return periodMapper.selectAllDesc();
     }
 
-    // 2. 获取配置
     @GetMapping("/config")
     public PeriodSetting getConfig() {
         return settingMapper.selectById(1);
     }
 
-    // 3. 更新配置
     @PostMapping("/config/save")
     public String saveConfig(@RequestBody PeriodSetting setting) {
         setting.setId(1);
         settingMapper.updateById(setting);
-        return "配置已更新";
+        return "success";
     }
 
-    // 4. 核心：切换某一天是否为经期
-    // 前端传来的 date: yyyy-MM-dd, isPeriod: true/false
-    @PostMapping("/toggle")
-    public String toggleDate(@RequestBody ToggleRequest req) {
+    // --- 新逻辑：设置经期开始 ---
+    @PostMapping("/setStart")
+    public String setStart(@RequestBody DateRequest req) {
+        LocalDate start = req.getDate();
+
+        // 1. 获取默认持续天数 (比如8天)
+        PeriodSetting setting = settingMapper.selectById(1);
+        int duration = (setting != null && setting.getPeriodLength() != null) ? setting.getPeriodLength() : 7;
+        LocalDate end = start.plusDays(duration - 1); // 减1是因为包含当天
+
+        // 2. 检查冲突 (简单处理：如果有重叠的，删掉旧的)
+        // 实际项目可能需要更复杂的合并逻辑，这里为了演示稳定性，采用“覆盖”策略
+        List<PeriodRecord> overlaps = periodMapper.selectAllDesc(); // 这里应该用SQL查重叠，为了省事在内存处理
+        for (PeriodRecord r : overlaps) {
+            // 如果新记录和旧记录有重叠
+            if (!(end.isBefore(r.getStartDate()) || start.isAfter(r.getEndDate()))) {
+                periodMapper.deleteById(r.getId());
+            }
+        }
+
+        // 3. 创建新记录
+        PeriodRecord newRecord = new PeriodRecord();
+        newRecord.setStartDate(start);
+        newRecord.setEndDate(end);
+        periodMapper.insert(newRecord);
+
+        return "Started";
+    }
+
+    // --- 新逻辑：设置经期结束 ---
+    @PostMapping("/setEnd")
+    public String setEnd(@RequestBody DateRequest req) {
         LocalDate targetDate = req.getDate();
-        boolean isPeriod = req.getIsPeriod();
 
-        // 查出这一天是否已经在某个记录里
-        List<PeriodRecord> records = periodMapper.selectAllDesc();
-        PeriodRecord hitRecord = null;
-
-        for (PeriodRecord r : records) {
+        // 找到包含这一天的记录
+        List<PeriodRecord> all = periodMapper.selectAllDesc();
+        for (PeriodRecord r : all) {
+            // 如果这一天在某个记录范围内
             if (!targetDate.isBefore(r.getStartDate()) && !targetDate.isAfter(r.getEndDate())) {
-                hitRecord = r;
-                break;
+                // 修改结束日期为今天
+                r.setEndDate(targetDate);
+                periodMapper.updateById(r);
+                return "Ended";
             }
         }
 
-        if (isPeriod) {
-            // 用户说今天是！
-            if (hitRecord != null) return "Success"; // 已经在记录里了，不用动
+        // 如果没找到（比如用户手滑点错了），可以考虑创建一个单日记录，或者报错
+        // 这里我们做一个容错：如果没找到，就创建一个单日记录
+        PeriodRecord r = new PeriodRecord();
+        r.setStartDate(targetDate);
+        r.setEndDate(targetDate);
+        periodMapper.insert(r);
 
-            // 检查是否能合并到前一段或后一段
-            // 这里为了简化逻辑，如果当天不是经期，我们直接创建一条单日记录
-            // 或者：检查昨天是不是经期？是的话延长昨天。检查明天是不是？是的话合并。
-            // 简单处理：直接新建，前端会看到，如果用户连续点，我们可以在后端做一个合并逻辑，但比较复杂。
-            // 我们采用最稳健的方式：新建一条。
-            // 进阶优化：检查有没有结束日期是昨天的？
-            boolean merged = false;
-            for (PeriodRecord r : records) {
-                if (r.getEndDate().plusDays(1).equals(targetDate)) {
-                    r.setEndDate(targetDate);
-                    periodMapper.updateById(r);
-                    merged = true;
-                    break;
-                }
-                if (r.getStartDate().minusDays(1).equals(targetDate)) {
-                    r.setStartDate(targetDate);
-                    periodMapper.updateById(r);
-                    merged = true;
-                    break;
-                }
-            }
-            if (!merged) {
-                PeriodRecord newRecord = new PeriodRecord();
-                newRecord.setStartDate(targetDate);
-                newRecord.setEndDate(targetDate);
-                periodMapper.insert(newRecord);
-            }
-        } else {
-            // 用户说今天不是！(但数据库里有) -> 需要切断
-            if (hitRecord != null) {
-                if (hitRecord.getStartDate().equals(targetDate) && hitRecord.getEndDate().equals(targetDate)) {
-                    // 就是只有这一天，删掉
-                    periodMapper.deleteById(hitRecord.getId());
-                } else if (hitRecord.getStartDate().equals(targetDate)) {
-                    // 是第一天，开始日期+1
-                    hitRecord.setStartDate(targetDate.plusDays(1));
-                    periodMapper.updateById(hitRecord);
-                } else if (hitRecord.getEndDate().equals(targetDate)) {
-                    // 是最后一天，结束日期-1
-                    hitRecord.setEndDate(targetDate.minusDays(1));
-                    periodMapper.updateById(hitRecord);
-                } else {
-                    // 在中间！裂开成两段
-                    PeriodRecord newTail = new PeriodRecord();
-                    newTail.setStartDate(targetDate.plusDays(1));
-                    newTail.setEndDate(hitRecord.getEndDate());
-                    periodMapper.insert(newTail);
-
-                    hitRecord.setEndDate(targetDate.minusDays(1));
-                    periodMapper.updateById(hitRecord);
-                }
-            }
-        }
-        return "Updated";
+        return "Ended (New)";
     }
 
-    @Data
-    static class ToggleRequest {
+    @lombok.Data
+    static class DateRequest {
         private LocalDate date;
-        private Boolean isPeriod;
     }
 }
