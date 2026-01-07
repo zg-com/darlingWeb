@@ -17,4 +17,17 @@ public class Goal {
     private String unit;       // 单位
     // --- 新增这个字段 ---
     private String color;      // 进度条颜色
+    // --- 新增字段 ---
+    /**
+     * 类型：
+     * 1 = 数值累积型 (攒黄金)
+     * 2 = 日期纪念日型 (在一起XX天)
+     */
+    private Integer type;
+
+    /**
+     * 起始日期，格式 "2025-09-25"
+     * 只有 type=2 时才用这个
+     */
+    private String startDate;
 }
