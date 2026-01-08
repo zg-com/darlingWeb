@@ -13,4 +13,6 @@ public class GameScore {
     private String playerName;
     private Integer score;
     private LocalDateTime createTime;
+    // 在原来的字段下面增加：
+    private Integer gameType; // 1 or 2
 }

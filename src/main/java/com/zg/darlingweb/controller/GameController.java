@@ -14,10 +14,13 @@ public class GameController {
     private GameScoreMapper gameScoreMapper;
 
     // 获取排行榜
+    // 修改 rank 接口，接收 type 参数
     @GetMapping("/rank")
-    public List<GameScore> getRank() {
-        return gameScoreMapper.selectTop10();
+    public List<GameScore> getRank(@RequestParam(defaultValue = "1") Integer type) {
+        return gameScoreMapper.selectTop10(type);
     }
+
+// submit 接口不用改，因为前端传的 JSON 会自动映射到实体类的 gameType 字段
 
     // 上传分数
     @PostMapping("/submit")
